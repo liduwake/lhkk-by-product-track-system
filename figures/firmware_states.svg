@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="760" viewBox="0 0 1240 760" font-family="Segoe UI, Helvetica Neue, Arial, sans-serif">
+<style>
+ .bx    { fill:#FFFFFF; stroke:#9AA3A0; stroke-width:1.6; }
+ .bxa   { fill:#FFFFFF; stroke:#2B6B5B; stroke-width:2.2; }
+ .bxf   { fill:#F7F9F8; stroke:#9AA3A0; stroke-width:1.6; stroke-dasharray:6 4; }
+ .t1    { font-size:19px; font-weight:600; fill:#17201E; }
+ .t2    { font-size:15px; fill:#5F6B68; }
+ .dim   { font-size:13.5px; fill:#8B9794; }
+ .hdr   { font-size:14.5px; font-weight:600; fill:#5F6B68; letter-spacing:1.2px; }
+ .wire  { stroke:#2B6B5B; stroke-width:2; fill:none; }
+ .wired { stroke:#8B9794; stroke-width:2; fill:none; stroke-dasharray:7 5; }
+ .lbl   { font-size:14.5px; fill:#2B6B5B; }
+ .lblg  { font-size:14.5px; fill:#5F6B68; }
+ .pill  { fill:#2B6B5B; }
+ .pt    { font-size:14px; font-weight:600; fill:#FFFFFF; }
+</style>
+<defs>
+ <marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+  <path d="M0,0 L10,5 L0,10 z" fill="#2B6B5B"/></marker>
+ <marker id="g" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+  <path d="M0,0 L10,5 L0,10 z" fill="#8B9794"/></marker>
+</defs>
+<rect width="1240" height="760" fill="#FFFFFF"/>
+
+<text class="hdr" x="40" y="44">FIRMWARE STATE MACHINE OF ONE MEASURING POINT</text>
+
+<!-- INIT -->
+<rect class="bx" x="40" y="90" width="200" height="64" rx="14"/>
+<text class="t1" x="60" y="118">INIT</text>
+<text class="t2" x="60" y="140">waiting for z</text>
+<path class="wire" d="M90 154 V 274" marker-end="url(#a)"/>
+<text class="lbl" x="104" y="226">z on the empty</text>
+<text class="lbl" x="104" y="246">platform: zero set</text>
+
+<!-- OFF_PANEL -->
+<rect class="bx" x="40" y="276" width="240" height="104" rx="14"/>
+<text class="t1" x="60" y="306">OFF_PANEL</text>
+<text class="t2" x="60" y="330">box lifted or not yet placed</text>
+<text class="t2" x="60" y="350">zero refresh after 3 s,</text>
+<text class="t2" x="60" y="368">only in the narrow band</text>
+
+<!-- STABLE -->
+<rect class="bxa" x="520" y="276" width="240" height="104" rx="14"/>
+<text class="t1" x="540" y="306">STABLE</text>
+<text class="t2" x="540" y="330">the reading is steady</text>
+<text class="t2" x="540" y="350">the reference follows slow</text>
+<text class="t2" x="540" y="368">drift (at most 0.2 g/s)</text>
+
+<!-- SETTLING -->
+<rect class="bx" x="1000" y="276" width="200" height="104" rx="14"/>
+<text class="t1" x="1020" y="306">SETTLING</text>
+<text class="t2" x="1020" y="330">waiting until the</text>
+<text class="t2" x="1020" y="350">reading is steady</text>
+<text class="t2" x="1020" y="368">again</text>
+
+<!-- OFF_PANEL -> STABLE -->
+<path class="wire" d="M280 346 H 518" marker-end="url(#a)"/>
+<text class="lbl" x="400" y="302" text-anchor="middle">box is back:</text>
+<text class="lbl" x="400" y="320" text-anchor="middle">steady above half</text>
+<text class="lbl" x="400" y="338" text-anchor="middle">of the box weight</text>
+<rect class="pill" x="300" y="362" width="200" height="28" rx="14"/>
+<text class="pt" x="400" y="381" text-anchor="middle">EVENT  emptying</text>
+<text class="dim" x="400" y="410" text-anchor="middle">only if the content fell by</text>
+<text class="dim" x="400" y="428" text-anchor="middle">at least the threshold</text>
+
+<!-- STABLE -> SETTLING -->
+<path class="wire" d="M760 322 H 998" marker-end="url(#a)"/>
+<text class="lbl" x="880" y="266" text-anchor="middle">reading differs from the</text>
+<text class="lbl" x="880" y="284" text-anchor="middle">reference by more than</text>
+<text class="lbl" x="880" y="302" text-anchor="middle">the threshold</text>
+
+<!-- SETTLING -> STABLE -->
+<path class="wire" d="M1000 358 H 762" marker-end="url(#a)"/>
+<text class="lbl" x="880" y="382" text-anchor="middle">steady again (1-s span</text>
+<text class="lbl" x="880" y="400" text-anchor="middle">at most 600 counts)</text>
+<rect class="pill" x="772" y="414" width="216" height="28" rx="14"/>
+<text class="pt" x="880" y="433" text-anchor="middle">EVENT  addition / removal</text>
+<text class="dim" x="880" y="462" text-anchor="middle">if the change is at least the</text>
+<text class="dim" x="880" y="480" text-anchor="middle">threshold, otherwise no event</text>
+
+<!-- SETTLING -> OFF_PANEL (over the top) -->
+<path class="wire" d="M1100 276 V 196 H 262 V 274" marker-end="url(#a)"/>
+<text class="lbl" x="650" y="184" text-anchor="middle">steady below half of the box weight: the box has been lifted off the panel</text>
+
+<!-- FAULT -->
+<rect class="bxf" x="520" y="590" width="240" height="84" rx="14"/>
+<text class="t1" x="540" y="620">FAULT</text>
+<text class="t2" x="540" y="644">MAINT signal, no events</text>
+<path class="wired" d="M580 380 V 588" marker-end="url(#g)"/>
+<text class="lblg" x="568" y="520" text-anchor="end">from any state:</text>
+<text class="lblg" x="568" y="540" text-anchor="end">no data, saturated,</text>
+<text class="lblg" x="568" y="560" text-anchor="end">sample rate not plausible</text>
+<path class="wire" d="M700 590 V 382" marker-end="url(#a)"/>
+<text class="lbl" x="712" y="520">signal back and steady:</text>
+<text class="lbl" x="712" y="540">the level becomes the new</text>
+<text class="lbl" x="712" y="560">reference, no event</text>
+
+<!-- notes -->
+<line x1="40" y1="700" x2="1200" y2="700" stroke="#DCE2E0" stroke-width="1.2"/>
+<text class="dim" x="40" y="724">Bench values: threshold 300 g (1 000 g for the real container) · steady = 1-s window span at most 600 counts · half of the box weight = off-panel level</text>
+<text class="dim" x="40" y="744">Narrow zero band ± 100 g · a zero step with a load on the platform cannot be told from a real change (limit, see 5.4)</text>
+</svg>
