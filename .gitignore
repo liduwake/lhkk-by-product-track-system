@@ -1,0 +1,6 @@
+# Secrets: never commit. Copy secrets.example.h to secrets.h and fill it in.
+secrets.h
+**/secrets.h
+*.pem
+*.key
+.env
