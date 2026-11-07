@@ -1,0 +1,170 @@
+{
+  "ruleChain": {
+    "name": "SmartKitchen daily import",
+    "type": "CORE",
+    "firstRuleNodeId": null,
+    "root": false,
+    "debugMode": false,
+    "configuration": null,
+    "additionalInfo": {
+      "description": ""
+    }
+  },
+  "metadata": {
+    "version": 6,
+    "firstNodeIndex": null,
+    "nodes": [
+      {
+        "type": "org.thingsboard.rule.engine.debug.TbMsgGeneratorNode",
+        "name": "Daily trigger",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 2,
+        "configuration": {
+          "msgCount": 0,
+          "periodInSeconds": 86400,
+          "scriptLang": "JS",
+          "jsScript": "// smartkitchen_daily_import_rulechain_20261103_v1 - Generator\r\n// Asks SmartKitchen for the last 7 days, today included (dates in UTC).\r\nvar DAY = 86400000;\r\nvar now = Date.now();\r\nfunction isoDay(ms) { return new Date(ms).toISOString().substring(0, 10); }\r\nvar body = { time: { start: isoDay(now - 7 * DAY), end: isoDay(now) } };\r\nreturn { msg: body, metadata: {}, msgType: \"POST_TELEMETRY_REQUEST\" };",
+          "tbelScript": "var msg = { temp: 42, humidity: 77 };\nvar metadata = { data: 40 };\nvar msgType = \"POST_TELEMETRY_REQUEST\";\n\nreturn { msg: msg, metadata: metadata, msgType: msgType };",
+          "originatorId": "db742360-d608-11f1-86c1-cdf15b9d0c51",
+          "originatorType": "DEVICE"
+        },
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 89,
+          "layoutY": 333
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.metadata.TbGetAttributesNode",
+        "name": "Load token",
+        "debugSettings": null,
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 1,
+        "configuration": {
+          "tellFailureIfAbsent": true,
+          "fetchTo": "METADATA",
+          "clientAttributeNames": [],
+          "sharedAttributeNames": [],
+          "serverAttributeNames": [
+            "sk_api_token"
+          ],
+          "latestTsKeyNames": [],
+          "getLatestValueWithTs": false
+        },
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 459,
+          "layoutY": 130
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.rest.TbRestApiCallNode",
+        "name": "Call SmartKitchen API",
+        "debugSettings": {
+          "failuresEnabled": false,
+          "allEnabled": false,
+          "allEnabledUntil": 1793700553799
+        },
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 4,
+        "configuration": {
+          "restEndpointUrlPattern": "https://my.smartkitchen.solutions/api/lhkk/get_food_waste.php",
+          "requestMethod": "POST",
+          "parseToPlainText": false,
+          "ignoreRequestBody": false,
+          "requestBodyTemplate": null,
+          "enableProxy": false,
+          "useSystemProxyProperties": false,
+          "proxyHost": null,
+          "proxyPort": 0,
+          "proxyUser": null,
+          "proxyPassword": null,
+          "readTimeoutMs": "30000",
+          "maxParallelRequestsCount": 0,
+          "headers": {
+            "Content-Type": "application/json",
+            "permanent-token": "${secret:smartkitchen_token;type:TEXT}"
+          },
+          "credentials": {
+            "type": "anonymous"
+          },
+          "maxInMemoryBufferSizeInKb": 256,
+          "queryParams": []
+        },
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 478,
+          "layoutY": 333
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.transform.TbTransformMsgNode",
+        "name": "Sum per day",
+        "debugSettings": {
+          "failuresEnabled": false,
+          "allEnabled": false,
+          "allEnabledUntil": 1793700553799
+        },
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 0,
+        "configuration": {
+          "scriptLang": "JS",
+          "jsScript": "// smartkitchen_daily_import_rulechain_20261103_v1 - Transformation\r\n// SmartKitchen response -> one telemetry entry per waste day for SK-01.\r\n// Keys as in smartkitchen_to_thingsboard_20261101_v2.ps1; ts = 12:00 UTC of the day.\r\nvar locations = Array.isArray(msg) ? msg : [msg];\r\nvar days = {};\r\nfunction categoryKey(name) {\r\n  return String(name).toLowerCase()\r\n    .replace(/ä/g, \"a\").replace(/ö/g, \"o\").replace(/å/g, \"a\")\r\n    .replace(/[^a-z0-9]+/g, \"_\") + \"_g\";\r\n}\r\nfor (var i = 0; i < locations.length; i++) {\r\n  var cats = locations[i].categories || [];\r\n  for (var c = 0; c < cats.length; c++) {\r\n    var k = categoryKey(cats[c].category_name);\r\n    var items = cats[c].items || [];\r\n    for (var j = 0; j < items.length; j++) {\r\n      var data = items[j].data || [];\r\n      for (var n = 0; n < data.length; n++) {\r\n        var e = data[n];\r\n        var w = Math.round(Number(e.weight) || 0);\r\n        var d = days[e.date];\r\n        if (!d) { d = { daily_total_g: 0, entries: 0, ewc_code_missing: 0 }; days[e.date] = d; }\r\n        d.daily_total_g += w;\r\n        d.entries += 1;\r\n        if (e.code === null || e.code === undefined || String(e.code).trim() === \"\") { d.ewc_code_missing += 1; }\r\n        d[k] = (d[k] || 0) + w;\r\n      }\r\n    }\r\n  }\r\n}\r\nvar out = [];\r\nfor (var date in days) {\r\n  out.push({ ts: Date.parse(date + \"T12:00:00Z\"), values: days[date] });\r\n}\r\nreturn { msg: out, metadata: metadata, msgType: \"POST_TELEMETRY_REQUEST\" };",
+          "tbelScript": "return {msg: msg, metadata: metadata, msgType: msgType};"
+        },
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 856,
+          "layoutY": 331
+        }
+      },
+      {
+        "type": "org.thingsboard.rule.engine.telemetry.TbMsgTimeseriesNode",
+        "name": "Save to SK-01",
+        "debugSettings": {
+          "failuresEnabled": false,
+          "allEnabled": false,
+          "allEnabledUntil": 1793700737141
+        },
+        "singletonMode": false,
+        "queueName": null,
+        "configurationVersion": 1,
+        "configuration": {
+          "defaultTTL": 0,
+          "useServerTs": false,
+          "processingSettings": {
+            "type": "ON_EVERY_MESSAGE"
+          }
+        },
+        "additionalInfo": {
+          "description": "",
+          "layoutX": 892,
+          "layoutY": 580
+        }
+      }
+    ],
+    "connections": [
+      {
+        "fromIndex": 0,
+        "toIndex": 2,
+        "type": "Success"
+      },
+      {
+        "fromIndex": 2,
+        "toIndex": 3,
+        "type": "Success"
+      },
+      {
+        "fromIndex": 3,
+        "toIndex": 4,
+        "type": "Success"
+      }
+    ],
+    "ruleChainConnections": null
+  }
+}

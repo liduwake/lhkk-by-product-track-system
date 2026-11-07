@@ -1,0 +1,30 @@
+// Calculated field "Next emptying forecast" v1.2 (ThingsBoard, TBEL) - on MP-01, MP-02, MP-03
+// Forecasts the next emptying from the point's own history; no container capacity is configured.
+// Arguments:
+//   content_after : latest telemetry content_after_g
+//   generated     : time series rolling on generated_g, 28 days, max 1000 values
+//   collected     : time series rolling on collected_g, 90 days, max 1000 values
+// Rule: level = mean emptied amount (90 days); rate = generated amount per day (28 days);
+//       days to emptying = max(level - content, 0) / rate. No output before 2 emptyings,
+//       3 additions and 2 days of data. It follows the emptying habit, not the container size.
+if (content_after == null) { return null; }
+var ts = ctx.args.content_after.ts;
+var content = content_after * 1.0;
+var nE = collected.count();
+var nG = generated.count();
+if (nE < 2 || nG < 3) { return null; }
+var level = collected.mean() * 1.0;
+var firstTs = generated.values[0].ts;
+var days = (ts - firstTs) / 86400000.0;
+if (days < 2.0) { return null; }
+var rate = generated.sum() / days;
+if (rate <= 0.0) { return null; }
+var left = level - content;
+var d = 0.0;
+if (left > 0.0) { d = left / rate; }
+var nextTs = ts + Math.round(d * 86400000.0);
+return { "ts": ts, "values": {
+  "next_emptying_ts": nextTs,
+  "days_to_emptying": Math.round(d * 10.0) / 10.0,
+  "emptying_level_kg": Math.round(level / 100.0) / 10.0,
+  "fill_rate_kg_day": Math.round(rate / 100.0) / 10.0 } };

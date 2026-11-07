@@ -1,0 +1,32 @@
+// Calculated field "By-product flows" v2 (ThingsBoard, TBEL) - on MP-01, MP-02, MP-03, MP-Test
+// Turns each scale event into one flow value (D3):
+//   addition -> generated_g; removal -> reused_g (if removal_meaning = "reuse") or removed_unknown_g;
+//   emptying -> collected_g. Value = |weight_change| in grams.
+// Arguments: event_type, weight_change (latest telemetry), removal_meaning (server attribute).
+// v2 (2026-11-03): output ts = the event's own ts, not ctx.latestTs
+// (latestTs also counts the update time of the removal_meaning attribute).
+if (event_type == null || weight_change == null) {
+  return null;
+}
+if (ctx.args.event_type == null || ctx.args.weight_change == null) {
+  return null;
+}
+if (ctx.args.event_type.ts != ctx.args.weight_change.ts) {
+  return null;
+}
+var ts = ctx.args.weight_change.ts;
+var val = Math.abs(weight_change);
+if (event_type == "addition") {
+  return { "ts": ts, "values": { "generated_g": val } };
+}
+if (event_type == "removal") {
+  if (removal_meaning == "reuse") {
+    return { "ts": ts, "values": { "reused_g": val } };
+  } else {
+    return { "ts": ts, "values": { "removed_unknown_g": val } };
+  }
+}
+if (event_type == "emptying") {
+  return { "ts": ts, "values": { "collected_g": val } };
+}
+return null;

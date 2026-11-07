@@ -1,70 +1,46 @@
 /* =============================================================================
-   File      : measuring_point_firmware_20261018_v1.ino
-   Purpose   : Firmware of one measuring point (bench version). Reads the
-               weighing platform, converts counts to grams, runs the state
-               machine of decision D3 and prints one EVENT line to the serial
-               port for every addition, removal and emptying. No network yet.
-   Thesis    : Developing a data-driven by-product tracking system to support
-               consistent data collection and sharing (LHKK / HAMK)
-   Section   : 4.6.3  Firmware and state machine   (Figure 7)
-   Author    : Duxing Li, HAMK
-   Date      : 2026-10-18
-   Version   : v1   (first version; built on hx711_raw_reader_20261018_v3)
-   -----------------------------------------------------------------------------
-   Changes from hx711_raw_reader_20261018_v3
-     1. Counts are converted to grams with the bench factor 27.7 counts/g
-        (second bench calibration, 2026-10-18).
-     2. State machine: INIT, STABLE, SETTLING, OFF_PANEL, FAULT.
-     3. Events are printed as "EVENT {...}" lines (addition, removal, emptying).
-     4. Zero is refreshed only when the box is off the panel and the reading is
-        inside a narrow band (rule b). Outside the band the firmware sends a
-        MAINT signal and does not re-zero.
-     5. Faults (no data, saturation, sample rate not plausible) give a MAINT
-        signal and never an event. After a fault the new level is taken as the
-        new reference without an event.
-     6. Slow drift of the reference is followed (max 0.2 g/s) so that drift
-        does not become an event.
-     6b. An event that would leave the content below -threshold is not sent
-        (MAINT NEGATIVE_CONTENT): the zero or the tare is wrong.
-     7. The 'f' / 's' raw modes of v3 are removed. Use v3 for raw readings.
-   -----------------------------------------------------------------------------
-   Hardware  : same as hx711_raw_reader_20261018_v3 (DAT -> GPIO 22, CLK -> GPIO 27)
-   Serial    : 115200 baud
-   Commands  : z = install zero (platform must be EMPTY, no box)
-               v = switch the one-line-per-second status on / off
-               i = print the parameters
-   Bench use : The Red Label bottle (1 527 g) is the "box" (TARE_G). Content =
-               the other bottles put on top of it. Lifting the Red Label (with
-               everything on it) and putting it back alone = emptying.
-   -----------------------------------------------------------------------------
-   Known limits (to be written in 4.6.3 and 5.4)
-     * A zero step of several hundred grams while a load is on the platform
-       looks like a removal or an addition of that size. It cannot be told
-       apart from a real event by the firmware. The threshold must be above the
-       largest zero step seen on the bench (about 340 g).
-     * A lift shorter than the 1-s window is not recognised as off-panel.
-     * Changes smaller than CHANGE_THRESHOLD_G are not recorded (D3).
-     * The zero reference is kept in RAM only. After a restart send z again.
-     * "uptime_ms" is time since boot. measured_at needs NTP time and comes
-       with the uplink program.
-   Parameters are provisional bench values. Final values come from the real
-   panel and the 240 L container.
-   AI usage  : First draft written with AI assistance (Claude, 2026-10-18),
-               then reviewed, compiled and tested by the author. The state
-               machine logic was also run against simulated sample streams on
-               a PC before the first run on the board.
+   File      : measuring_point_firmware_20261031_v6.ino
+   Purpose   : Firmware of one measuring point (bench version): weighing, state
+               machine, EVENT/MAINT lines, uplink to ThingsBoard (as v5).
+   Version   : v6 (2026-10-31)
+   Changes   : 1. Bench box = IKEA 10 L bin + Lindores ballast: TARE_G 1527 -> 797 g
+                  (kitchen scale). Off-panel limit becomes 398 g.
+               2. Nothing else changed.
+   AI usage  : Written with AI assistance (Claude); v6 change also by AI.
+               Reviewed and tested by the author.
+   Secrets   : Wi-Fi, token, ID and host are in secrets.h. Never show or commit it.
+   Details   : limits, commands and design notes: see the thesis, section 4.6.
    ============================================================================= */
 
 #include <math.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <time.h>
+#include <sys/time.h>
 
 // ---- pins -------------------------------------------------------------------
 const int PIN_DAT = 22;
 const int PIN_CLK = 27;
 
 // ---- configuration of this measuring point (Table 4) -----------------------
-const char* MP_ID               = "MP-01";
-const long  TARE_G              = 1527;   // weight of the empty box (bench: Red Label bottle)
+#include "secrets.h"
+#ifndef SECRET_MP_ID
+#define SECRET_MP_ID "MP-01"
+#endif
+const char* MP_ID               = SECRET_MP_ID;   // from secrets.h (v4)
+const long  TARE_G              = 797;    // empty box (bench: IKEA 10 L bin + Lindores ballast, kitchen scale)
 const long  CHANGE_THRESHOLD_G  = 300;    // bench value; Table 4 provisional value is 1 000
+
+// ---- network settings ----------------------------------------------------------
+// The secret values are in secrets.h (same folder, included above). Not shown in any listing.
+const char* WIFI_SSID     = SECRET_WIFI_SSID;
+const char* WIFI_PASSWORD = SECRET_WIFI_PASSWORD;
+const char* TB_TOKEN      = SECRET_TB_TOKEN;
+#ifndef SECRET_TB_HOST
+#define SECRET_TB_HOST "thingsboard.cloud"
+#endif
+const char* TB_HOST       = SECRET_TB_HOST;              // from secrets.h (v5), not a secret
 
 // ---- calibration and measured behaviour (bench log) -------------------------
 const float FACTOR              = 27.7f;  // counts per gram, bench calibration 2026-10-18
@@ -80,6 +56,10 @@ const unsigned long MIN_INTERVAL_MS    = 30;      // nominal interval is 93 ms
 const int           BAD_INTERVAL_LIMIT = 5;
 const int           ZERO_N             = 20;      // samples averaged for z
 const unsigned long STATUS_MS          = 1000;
+const int           UP_QUEUE_LEN       = 32;
+const unsigned long WIFI_WAIT_MS       = 15000;
+const unsigned long NTP_WAIT_MS        = 10000;
+const unsigned long RETRY_MS           = 10000;
 
 const long OFF_PANEL_G = TARE_G / 2;              // below this the box is off the panel
 
@@ -112,6 +92,23 @@ float         lastGrossG = 0;
 long          lastSpan   = 0;
 bool          lastValid  = false;
 
+// ---- uplink: queue between the weighing loop (core 1) and the network task (core 0)
+struct UpItem {
+  uint8_t       kind;        // 0 = event, 1 = maintenance signal
+  char          type[24];    // event_type, or the MAINT code
+  long          change;      // weight_change, g
+  long          after;       // content_after, g
+  unsigned long uptimeMs;    // millis() when it happened
+};
+QueueHandle_t upQueue    = NULL;
+bool          uplinkOn   = false;
+bool          wifiUp     = false;
+bool          timeOk     = false;
+int64_t       bootEpochMs = 0;          // UTC ms at millis() == 0, set when NTP is ready
+unsigned long upSent     = 0;
+unsigned long upFailed   = 0;
+int           upLastCode = 0;
+
 // ---- small helpers -----------------------------------------------------------
 const char* stateName(State s) {
   switch (s) {
@@ -124,11 +121,26 @@ const char* stateName(State s) {
   return "?";
 }
 
+void upPush(const UpItem& it) {
+  if (!uplinkOn) return;
+  if (xQueueSend(upQueue, &it, 0) != pdTRUE) {
+    Serial.println("# uplink queue full: entry dropped");
+  }
+}
+
 void maint(const char* code, const char* text) {
   Serial.print("MAINT ");
   Serial.print(code);
   Serial.print(" - ");
   Serial.println(text);
+  UpItem it;
+  it.kind = 1;
+  strncpy(it.type, code, sizeof(it.type) - 1);
+  it.type[sizeof(it.type) - 1] = 0;
+  it.change = 0;
+  it.after = 0;
+  it.uptimeMs = millis();
+  upPush(it);
 }
 
 void note(const char* text) {
@@ -143,6 +155,14 @@ void emitEvent(const char* type, long change, long after, unsigned long ms) {
            "\"weight_change\":%ld,\"content_after\":%ld,\"uptime_ms\":%lu}",
            MP_ID, type, change, after, ms);
   Serial.println(buf);
+  UpItem it;
+  it.kind = 0;
+  strncpy(it.type, type, sizeof(it.type) - 1);
+  it.type[sizeof(it.type) - 1] = 0;
+  it.change = change;
+  it.after = after;
+  it.uptimeMs = ms;
+  upPush(it);
 }
 
 void winReset() {
@@ -407,6 +427,105 @@ void printStatus() {
   Serial.println(buf);
 }
 
+// ---- uplink task (runs on core 0) ---------------------------------------------
+bool uplinkConfigured() {
+  return strncmp(WIFI_SSID, "YOUR_", 5) != 0 &&
+         strncmp(TB_TOKEN, "YOUR_", 5) != 0;
+}
+
+bool connectWifi() {
+  if (WiFi.status() == WL_CONNECTED) { wifiUp = true; return true; }
+  wifiUp = false;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_WAIT_MS) {
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  wifiUp = (WiFi.status() == WL_CONNECTED);
+  if (wifiUp) note("uplink: Wi-Fi connected");
+  return wifiUp;
+}
+
+bool syncTime() {
+  configTime(0, 0, "pool.ntp.org", "time.google.com");     // UTC
+  unsigned long t0 = millis();
+  while (millis() - t0 < NTP_WAIT_MS) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    if (tv.tv_sec > 1700000000L) {                         // clock is set (after Nov 2023)
+      bootEpochMs = (int64_t)tv.tv_sec * 1000LL + tv.tv_usec / 1000 - (int64_t)millis();
+      timeOk = true;
+      note("uplink: time synchronised (NTP)");
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  return false;
+}
+
+bool postItem(const UpItem& it) {
+  long long ts = (long long)(bootEpochMs + (int64_t)it.uptimeMs);
+  char body[256];
+  if (it.kind == 0) {
+    snprintf(body, sizeof(body),
+             "{\"ts\":%lld,\"values\":{\"measuring_point_id\":\"%s\",\"event_type\":\"%s\","
+             "\"weight_change\":%ld,\"content_after\":%ld}}",
+             ts, MP_ID, it.type, it.change, it.after);
+  } else {
+    snprintf(body, sizeof(body),
+             "{\"ts\":%lld,\"values\":{\"measuring_point_id\":\"%s\",\"maintenance\":\"%s\"}}",
+             ts, MP_ID, it.type);
+  }
+  char url[200];
+  snprintf(url, sizeof(url), "https://%s/api/v1/%s/telemetry", TB_HOST, TB_TOKEN);
+
+  WiFiClientSecure client;
+  client.setInsecure();                                    // see "Known limits"
+  HTTPClient http;
+  http.setTimeout(8000);
+  int code = -1;
+  if (http.begin(client, url)) {
+    http.addHeader("Content-Type", "application/json");
+    code = http.POST((uint8_t*)body, strlen(body));
+    http.end();
+  }
+  upLastCode = code;
+  return code >= 200 && code < 300;
+}
+
+void uplinkTask(void*) {
+  for (;;) {
+    if (!connectWifi()) { vTaskDelay(pdMS_TO_TICKS(RETRY_MS)); continue; }
+    if (!timeOk && !syncTime()) { vTaskDelay(pdMS_TO_TICKS(RETRY_MS)); continue; }
+    UpItem it;
+    if (xQueuePeek(upQueue, &it, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      if (postItem(it)) {
+        xQueueReceive(upQueue, &it, 0);                    // sent: remove it
+        upSent++;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "uplink: sent (HTTP %d), %lu sent in total", upLastCode, upSent);
+        note(buf);
+      } else {
+        upFailed++;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "uplink: send failed (code %d), will retry", upLastCode);
+        note(buf);
+        vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+      }
+    }
+  }
+}
+
+void printNetwork() {
+  char buf[220];
+  snprintf(buf, sizeof(buf), "# uplink: %s  host=%s  wifi=%s  time=%s  waiting=%d  sent=%lu  failed=%lu  last code=%d",
+           uplinkOn ? "on" : "OFF (secrets.h not filled in)", TB_HOST,
+           wifiUp ? "up" : "down", timeOk ? "ok" : "not yet",
+           uplinkOn ? (int)uxQueueMessagesWaiting(upQueue) : 0, upSent, upFailed, upLastCode);
+  Serial.println(buf);
+}
+
 // ---- Arduino entry points ----------------------------------------------------
 void setup() {
   Serial.begin(115200);
@@ -414,10 +533,20 @@ void setup() {
   pinMode(PIN_DAT, INPUT);
   digitalWrite(PIN_CLK, LOW);
   delay(500);
-  note("measuring_point_firmware_20261018_v1");
+  note("measuring_point_firmware_20261031_v6");
   printParameters();
-  note("Platform EMPTY (no box), then send z.   v = status on/off   i = parameters");
+  note("Platform EMPTY (no box), then send z.   v = status on/off   i = parameters   n = network");
   winReset();
+  if (uplinkConfigured()) {
+    upQueue = xQueueCreate(UP_QUEUE_LEN, sizeof(UpItem));
+    uplinkOn = (upQueue != NULL);
+  }
+  if (uplinkOn) {
+    xTaskCreatePinnedToCore(uplinkTask, "uplink", 12288, NULL, 1, NULL, 0);
+    note("uplink on: Wi-Fi and ThingsBoard");
+  } else {
+    note("uplink OFF: fill in secrets.h");
+  }
   lastStatus = millis();
 }
 
@@ -427,6 +556,7 @@ void loop() {
     if (c == 'z' || c == 'Z') zeroNow();
     else if (c == 'v' || c == 'V') { verbose = !verbose; note(verbose ? "status on" : "status off"); }
     else if (c == 'i' || c == 'I') printParameters();
+    else if (c == 'n' || c == 'N') printNetwork();
   }
 
   int32_t raw = hx711_read();
